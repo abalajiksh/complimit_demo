@@ -1,52 +1,69 @@
 #!/usr/bin/env bash
-# transcode_roundtrips.sh -- encode each master through each Bluetooth-class
-# codec and decode straight back to PCM. macOS build of ffmpeg: SBC and aptX
-# are native, AAC uses Apple's own AudioToolbox encoder (aac_at).
+# transcode_roundtrips.sh (v2) -- full codec matrix, now including the
+# degraded-link conditions where master-dependence might actually appear:
 #
-# Decoded files are written as 32-bit float so no second quantization is
-# stacked on top of the codec's own damage (negligible either way, but free).
+#   sbc328  : A2DP high-quality operating point (bitpool 53, joint stereo)
+#   sbc229  : common fallback bitpool (~35) -- "phone on a congested train"
+#   aptx    : fixed 4:1 ADPCM, no bitrate knob
+#   aptxhd  : same scheme, ~2 extra bits/subband-sample (~576 kbps)
+#   aac256  : Apple AudioToolbox encoder, Apple Music delivery rate
+#   aac160  : typical Android AAC-over-Bluetooth operating point
+#
+# Decoded output is 32-bit float so no second quantization stacks on top of
+# the codec's own damage.
 set -euo pipefail
 
 MASTERS=(orig moderate crushed)
 
+encode_decode () {
+    local master="$1" tag="$2"
+    local in="master_${master}.wav"
+
+    case "$tag" in
+        sbc328)
+            ffmpeg -hide_banner -loglevel warning -y -i "$in" \
+                -c:a sbc -b:a 328k "enc_${tag}_${master}.sbc"
+            ffmpeg -hide_banner -loglevel warning -y -i "enc_${tag}_${master}.sbc" \
+                -c:a pcm_f32le "decoded_${tag}_${master}.wav" ;;
+        sbc229)
+            ffmpeg -hide_banner -loglevel warning -y -i "$in" \
+                -c:a sbc -b:a 229k "enc_${tag}_${master}.sbc"
+            ffmpeg -hide_banner -loglevel warning -y -i "enc_${tag}_${master}.sbc" \
+                -c:a pcm_f32le "decoded_${tag}_${master}.wav" ;;
+        aptx)
+            ffmpeg -hide_banner -loglevel warning -y -i "$in" \
+                -c:a aptx -f aptx "enc_${tag}_${master}.aptx"
+            ffmpeg -hide_banner -loglevel warning -y -f aptx -ar 44100 -ac 2 \
+                -i "enc_${tag}_${master}.aptx" \
+                -c:a pcm_f32le "decoded_${tag}_${master}.wav" ;;
+        aptxhd)
+            ffmpeg -hide_banner -loglevel warning -y -i "$in" \
+                -c:a aptx_hd -f aptx_hd "enc_${tag}_${master}.aptxhd"
+            ffmpeg -hide_banner -loglevel warning -y -f aptx_hd -ar 44100 -ac 2 \
+                -i "enc_${tag}_${master}.aptxhd" \
+                -c:a pcm_f32le "decoded_${tag}_${master}.wav" ;;
+        aac256)
+            ffmpeg -hide_banner -loglevel warning -y -i "$in" \
+                -c:a aac_at -b:a 256k "enc_${tag}_${master}.m4a"
+            ffmpeg -hide_banner -loglevel warning -y -i "enc_${tag}_${master}.m4a" \
+                -c:a pcm_f32le "decoded_${tag}_${master}.wav" ;;
+        aac160)
+            ffmpeg -hide_banner -loglevel warning -y -i "$in" \
+                -c:a aac_at -b:a 160k "enc_${tag}_${master}.m4a"
+            ffmpeg -hide_banner -loglevel warning -y -i "enc_${tag}_${master}.m4a" \
+                -c:a pcm_f32le "decoded_${tag}_${master}.wav" ;;
+    esac
+    echo "  ${tag} done"
+}
+
 for m in "${MASTERS[@]}"; do
-    in="master_${m}.wav"
-    [[ -f "$in" ]] || { echo "missing $in -- run make_masters.py first"; exit 1; }
-
+    [[ -f "master_${m}.wav" ]] || { echo "missing master_${m}.wav"; exit 1; }
     echo "=== ${m} ==="
-
-    # --- SBC: A2DP high-quality operating point (bitpool 53 joint stereo,
-    # ~328 kbps at 44.1 kHz). The .sbc container is self-describing.
-    ffmpeg -hide_banner -loglevel warning -y -i "$in" \
-        -c:a sbc -b:a 328k "enc_sbc_${m}.sbc"
-    ffmpeg -hide_banner -loglevel warning -y -i "enc_sbc_${m}.sbc" \
-        -c:a pcm_f32le "decoded_sbc_${m}.wav"
-    echo "  sbc      done"
-
-    # --- aptX: fixed 4:1 ADPCM, no bitrate knob (~352 kbps stereo/44.1).
-    # Raw .aptx stream is headerless -> the decoder must be told the format.
-    ffmpeg -hide_banner -loglevel warning -y -i "$in" \
-        -c:a aptx -f aptx "enc_aptx_${m}.aptx"
-    ffmpeg -hide_banner -loglevel warning -y -f aptx -ar 44100 -ac 2 \
-        -i "enc_aptx_${m}.aptx" -c:a pcm_f32le "decoded_aptx_${m}.wav"
-    echo "  aptx     done"
-
-    # --- aptX HD: same scheme at 24-bit/~576 kbps. Bonus column for the
-    # "HD" marketing commentary.
-    ffmpeg -hide_banner -loglevel warning -y -i "$in" \
-        -c:a aptx_hd -f aptx_hd "enc_aptxhd_${m}.aptxhd"
-    ffmpeg -hide_banner -loglevel warning -y -f aptx_hd -ar 44100 -ac 2 \
-        -i "enc_aptxhd_${m}.aptxhd" -c:a pcm_f32le "decoded_aptxhd_${m}.wav"
-    echo "  aptx_hd  done"
-
-    # --- AAC via Apple's AudioToolbox encoder: the closest thing to the
-    # actual AirPods-era encode chain. 256k CBR mirrors Apple Music delivery.
-    ffmpeg -hide_banner -loglevel warning -y -i "$in" \
-        -c:a aac_at -b:a 256k "enc_aac_${m}.m4a"
-    ffmpeg -hide_banner -loglevel warning -y -i "enc_aac_${m}.m4a" \
-        -c:a pcm_f32le "decoded_aac_${m}.wav"
-    echo "  aac_at   done"
+    for tag in sbc328 sbc229 aptx aptxhd aac256 aac160; do
+        encode_decode "$m" "$tag"
+    done
 done
 
 echo
-echo "All round-trips complete. Next: python3 analyze_residuals.py"
+echo "All round-trips complete."
+echo "Next: python3 analyze_residuals.py   (then python3 run_visqol.py)"
